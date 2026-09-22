@@ -70,6 +70,11 @@ class AzureProvider(BaseOmniProx):
 
         # Container pool management
         self.container_pool = []
+        # Extra tags merged into each container_group's tags on create().
+        # Tools that embed omniprox can set this before calling create()
+        # to attribute the pool to themselves (e.g. {"created_by": "mytool"})
+        # so they can filter list/destroy calls to their own containers.
+        self.extra_pool_tags = {}
 
         # Initialize base class (this will call load_profile)
         super().__init__('azure', args)
@@ -375,7 +380,8 @@ server.listen(80, () => {{
                             'created_by': 'omniprox',
                             'pool_id': timestamp,
                             'target_url': self.url,
-                            'container_number': str(i)
+                            'container_number': str(i),
+                            **(self.extra_pool_tags or {}),
                         }
                     )
 
