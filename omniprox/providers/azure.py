@@ -392,11 +392,25 @@ server.listen(80, () => {{
                         container_group
                     )
 
-                    # Wait for deployment (with timeout)
-                    result = operation.result(timeout=60)
+                    # Wait for deployment. Public IP allocation on ACI can trail
+                    # container start by 30-90s in busy regions, so 60s is often
+                    # too short and returns a group with no ip_address bound.
+                    result = operation.result(timeout=300)
 
-                    # Get the public IP/FQDN
-                    if result.ip_address:
+                    # ARM sometimes reports the group provisioned before the
+                    # public IP/FQDN is populated. Refetch a few times before
+                    # treating the container as unusable.
+                    if not (result.ip_address and result.ip_address.ip):
+                        for _ in range(6):
+                            time.sleep(10)
+                            result = self.aci_client.container_groups.get(
+                                self.resource_group,
+                                container_group_name,
+                            )
+                            if result.ip_address and result.ip_address.ip:
+                                break
+
+                    if result.ip_address and result.ip_address.ip:
                         container_info = {
                             'name': container_group_name,
                             'ip': result.ip_address.ip,
@@ -411,11 +425,37 @@ server.listen(80, () => {{
                         print(f"  [OK] Deployed: {container_info['url']}")
                         print(f"       IP: {container_info['ip']}")
                     else:
-                        print(f"  [WARNING] Deployed but no IP assigned")
+                        # Container is running and billing but never got a
+                        # public IP, so it is unusable. Delete it so the caller
+                        # is not left with a hidden charge to notice at bill
+                        # time.
+                        print(f"  [WARNING] Deployed but no IP assigned; deleting to avoid orphan charges")
+                        try:
+                            self.aci_client.container_groups.begin_delete(
+                                self.resource_group,
+                                container_group_name,
+                            )
+                        except Exception as delete_error:
+                            print(f"  [WARNING] Could not delete orphaned container {container_group_name}: {str(delete_error)[:100]}")
+                            self.logger.warning(
+                                "Orphaned container %s left in resource group %s: %s",
+                                container_group_name,
+                                self.resource_group,
+                                delete_error,
+                            )
 
                 except Exception as e:
                     print(f"  [FAILED] {str(e)[:100]}")
                     self.logger.error(f"Failed to create container {i}: {e}")
+                    # Best-effort delete in case the SDK error came after the
+                    # create actually reached ARM.
+                    try:
+                        self.aci_client.container_groups.begin_delete(
+                            self.resource_group,
+                            container_group_name,
+                        )
+                    except Exception:
+                        pass
 
                 # Small delay between container creations
                 if i < self.pool_size:
